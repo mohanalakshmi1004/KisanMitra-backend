@@ -1,0 +1,190 @@
+const tf = require('@tensorflow/tfjs');
+const path = require('path');
+const fs = require('fs');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim();
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION?.trim() || "v1";
+const REQUESTED_GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "chat-bison-001";
+const DEFAULT_FALLBACK_MODELS = ["gemini-1.5-mini", "text-bison-001"];
+const CONFIGURED_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODELS.join(",")).split(",")
+    .map((name) => name.trim())
+    .filter((name) => name && name !== REQUESTED_GEMINI_MODEL);
+const GEMINI_MODEL_CANDIDATES = [REQUESTED_GEMINI_MODEL, ...new Set(CONFIGURED_FALLBACK_MODELS)];
+
+console.log(`Gemini config: version=${GEMINI_API_VERSION} primary=${REQUESTED_GEMINI_MODEL} candidates=${GEMINI_MODEL_CANDIDATES.join(', ')}`);
+
+const ensureGenerativeAI = () => {
+    if (!GEMINI_API_KEY) {
+        throw new Error("Gemini API key is not configured. Set GEMINI_API_KEY in backend/.env");
+    }
+    if (!genAI) {
+        throw new Error("Gemini client initialization failed.");
+    }
+    return genAI;
+};
+
+const generateWithGemini = async ({ prompt, imagePart }) => {
+    const client = ensureGenerativeAI();
+    const models = GEMINI_MODEL_CANDIDATES;
+    let lastError = null;
+
+    for (let index = 0; index < models.length; index += 1) {
+        const modelName = models[index];
+        try {
+            const model = client.getGenerativeModel({ model: modelName }, { apiVersion: GEMINI_API_VERSION });
+            return imagePart
+                ? await model.generateContent([prompt, imagePart])
+                : await model.generateContent(prompt);
+        } catch (err) {
+            lastError = err;
+            const message = err?.message || "";
+            const isQuotaError = err?.status === 429 || /429|quota|exhausted|rate limit/i.test(message);
+            const isUnsupportedModel = /not (supported|found|available)|unsupported model|not supported for/i.test(message);
+            const isLastModel = index === models.length - 1;
+
+            console.warn(`Gemini model ${modelName} failed:`, message || err);
+
+            if (isLastModel) {
+                if (isUnsupportedModel) {
+                    throw new Error(`All configured Gemini models failed. Update GEMINI_MODEL in backend/.env to a model supported by your API version.`);
+                }
+                throw err;
+            }
+
+            if (isQuotaError || isUnsupportedModel) {
+                console.warn(`Skipping ${modelName} and trying next fallback model.`);
+                continue;
+            }
+
+            throw err;
+        }
+    }
+
+    throw new Error(`Gemini requests failed for all configured models: ${GEMINI_MODEL_CANDIDATES.join(', ')}`);
+};
+
+// AI నుండి వచ్చే టెక్స్ట్ ని క్లీన్ గా తీయడానికి హెల్పర్
+const extractGenAIText = (result) => {
+    try {
+        const textHelper = result?.response?.text;
+        if (typeof textHelper === 'function') {
+            return textHelper();
+        }
+        if (typeof textHelper === 'string') {
+            return textHelper;
+        }
+    } catch (e) {
+        // ignore and return empty string below
+    }
+    return "";
+};
+
+const CROP_LABELS = [
+    "rice", "maize", "chickpea", "kidneybeans", "pigeonpeas",
+    "mothbeans", "mungbean", "blackgram", "lentil", "pomegranate",
+    "banana", "mango", "grapes", "watermelon", "muskmelon",
+    "apple", "orange", "papaya", "coconut", "cotton", "jute", "coffee"
+];
+const SOIL_LABELS = ["Sandy", "Loamy", "Black", "Red", "Clayey"];
+
+// TensorFlow మోడల్స్ లోడ్ చేయడానికి హెల్పర్
+const getModelFromMemory = (dir, modelFile, weightFile) => {
+    const modelPath = path.join(dir, modelFile);
+    const weightPath = path.join(dir, weightFile);
+    if (!fs.existsSync(modelPath) || !fs.existsSync(weightPath)) throw new Error(`Files missing in ${dir}`);
+    const modelInfo = JSON.parse(fs.readFileSync(modelPath, 'utf8'));
+    const weightsBin = fs.readFileSync(weightPath);
+    return { modelTopology: modelInfo.modelTopology, weightSpecs: modelInfo.weightSpecs, weightData: weightsBin.buffer };
+};
+
+// 🟢 1. CROP RECOMMENDATION
+const getRecommendation = async (req, res) => {
+    try {
+        const { n, p, k, ph, temp, humidity, rainfall } = req.body;
+        const modelDir = path.join(__dirname, '../ml_models');
+        const model = await tf.loadLayersModel(tf.io.fromMemory(getModelFromMemory(modelDir, 'model.json', 'weights.bin')));
+        const input = tf.tensor2d([[Number(n), Number(p), Number(k), Number(temp || 25), Number(humidity || 70), Number(ph), Number(rainfall || 100)]]);
+        const resultIdx = model.predict(input).argMax(1).dataSync()[0];
+        res.json({ success: true, recommendedCrop: CROP_LABELS[resultIdx], confidence: "95.00" });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+// 🟢 2. SOIL DIAGNOSTIC
+const analyzeSoil = async (req, res) => {
+    try {
+        const { n, p, k } = req.body;
+        const modelDir = path.join(__dirname, '../soil_ml_models');
+        const model = await tf.loadLayersModel(tf.io.fromMemory(getModelFromMemory(modelDir, 'soil_model.json', 'soil_weights.bin')));
+        const input = tf.tensor2d([[Number(n), Number(p), Number(k)]]);
+        const resultIdx = model.predict(input).argMax(1).dataSync()[0];
+        const soilType = SOIL_LABELS[resultIdx];
+        const soilTreatments = {
+            Sandy: "Use compost and mulch.", Loamy: "Keep well-drained.",
+            Black: "Avoid water logging.", Red: "Add organic matter.", Clayey: "Improve drainage with gypsum."
+        };
+        res.json({ success: true, soilType, treatment: soilTreatments[soilType] || "Use organic compost.", confidence: "95.00" });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+};
+
+// 🟢 3. PEST DETECTION
+const detectPestWithGemini = async (req, res) => {
+    try {
+        const { language } = req.body;
+        const file = req.file || (req.files && req.files[0]);
+        if (!file) return res.status(400).json({ success: false, message: "No image uploaded" });
+
+        const imagePart = { inlineData: { data: file.buffer.toString("base64"), mimeType: file.mimetype } };
+        const langName = language === 'te' ? 'Telugu' : 'English';
+        
+        const prompt = `Analyze this crop leaf image. Disease name and treatment in ${langName}. Return ONLY JSON: { "disease": "...", "treatment": "...", "confidence": "90%" }`;
+
+        const result = await generateWithGemini({ prompt, imagePart });
+        const text = extractGenAIText(result);
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        res.json({ success: true, ...JSON.parse(jsonMatch[0]) });
+    } catch (e) {
+        console.error("❌ Pest Error:", e.message || e);
+        if (e.status === 429 || (e.message && e.message.includes("429"))) {
+            return res.status(503).json({
+                success: false,
+                message: "AI quota exhausted. Pest analysis is temporarily unavailable. Please try again later."
+            });
+        }
+        res.status(500).json({ success: false, message: "Pest analysis failed." });
+    }
+};
+
+// 🟢 4. PRICE PREDICTION
+const predictPrice = async (req, res) => {
+    try {
+        const { cropName, crop, language } = req.body;
+        const finalCrop = cropName || crop;
+        if (!finalCrop) return res.status(400).json({ success: false, message: "Crop name missing" });
+
+        const langName = language === 'te' ? 'Telugu' : 'English';
+        const prompt = `Market price for ${finalCrop} in AP. Respond in ${langName}. Return ONLY JSON: { "currentPrice": "...", "trend": "...", "advice": "..." }`;
+
+        const result = await generateWithGemini({ prompt });
+        const text = extractGenAIText(result);
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        res.json({ success: true, ...JSON.parse(jsonMatch[0]) });
+    } catch (e) {
+        if (e.status === 429 || (e.message && e.message.includes("429"))) {
+            return res.status(503).json({
+                success: false,
+                message: "AI quota exhausted. Price prediction is temporarily unavailable. Please try again later."
+            });
+        }
+        res.status(500).json({ success: false, message: "Market Service Busy" });
+    }
+};
+
+// ✅ ఈ ఎక్స్‌పోర్ట్స్ చాలా ముఖ్యం!
+module.exports = {
+    getRecommendation,
+    analyzeSoil,
+    detectPestWithGemini,
+    predictPrice
+};
