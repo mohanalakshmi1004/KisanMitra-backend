@@ -5,9 +5,13 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim();
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
-const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION?.trim() || "v1";
-const REQUESTED_GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "chat-bison-001";
-const DEFAULT_FALLBACK_MODELS = ["gemini-1.5-mini", "text-bison-001"];
+const GEMINI_API_VERSION =
+  process.env.GEMINI_API_VERSION?.trim() || "v1beta";
+const REQUESTED_GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-1.5-flash";
+const DEFAULT_FALLBACK_MODELS = [
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
+];
 const CONFIGURED_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODELS.join(",")).split(",")
     .map((name) => name.trim())
     .filter((name) => name && name !== REQUESTED_GEMINI_MODEL);
@@ -33,28 +37,32 @@ const generateWithGemini = async ({ prompt, imagePart }) => {
     for (let index = 0; index < models.length; index += 1) {
         const modelName = models[index];
         try {
+            console.log(`🔄 Attempting Gemini model: ${modelName} with API version: ${GEMINI_API_VERSION}`);
             const model = client.getGenerativeModel({ model: modelName }, { apiVersion: GEMINI_API_VERSION });
-            return imagePart
+            const response = imagePart
                 ? await model.generateContent([prompt, imagePart])
                 : await model.generateContent(prompt);
+            console.log(`✅ Gemini model ${modelName} succeeded`);
+            return response;
         } catch (err) {
             lastError = err;
             const message = err?.message || "";
+            const statusCode = err?.status || err?.code || "unknown";
             const isQuotaError = err?.status === 429 || /429|quota|exhausted|rate limit/i.test(message);
-            const isUnsupportedModel = /not (supported|found|available)|unsupported model|not supported for/i.test(message);
+            const isUnsupportedModel = /not (supported|found|available)|unsupported model|not supported for|404/i.test(message);
             const isLastModel = index === models.length - 1;
 
-            console.warn(`Gemini model ${modelName} failed:`, message || err);
+            console.error(`❌ Gemini model ${modelName} failed (Status: ${statusCode}):`, message || err);
 
             if (isLastModel) {
                 if (isUnsupportedModel) {
-                    throw new Error(`All configured Gemini models failed. Update GEMINI_MODEL in backend/.env to a model supported by your API version.`);
+                    throw new Error(`All Gemini models failed - models may be unavailable. Update GEMINI_MODEL in backend/.env.`);
                 }
                 throw err;
             }
 
             if (isQuotaError || isUnsupportedModel) {
-                console.warn(`Skipping ${modelName} and trying next fallback model.`);
+                console.warn(`⏭️ Skipping ${modelName} and trying next fallback model...`);
                 continue;
             }
 
@@ -65,7 +73,6 @@ const generateWithGemini = async ({ prompt, imagePart }) => {
     throw new Error(`Gemini requests failed for all configured models: ${GEMINI_MODEL_CANDIDATES.join(', ')}`);
 };
 
-// AI నుండి వచ్చే టెక్స్ట్ ని క్లీన్ గా తీయడానికి హెల్పర్
 const extractGenAIText = (result) => {
     try {
         const textHelper = result?.response?.text;
@@ -76,7 +83,7 @@ const extractGenAIText = (result) => {
             return textHelper;
         }
     } catch (e) {
-        // ignore and return empty string below
+       
     }
     return "";
 };
@@ -89,7 +96,7 @@ const CROP_LABELS = [
 ];
 const SOIL_LABELS = ["Sandy", "Loamy", "Black", "Red", "Clayey"];
 
-// TensorFlow మోడల్స్ లోడ్ చేయడానికి హెల్పర్
+
 const getModelFromMemory = (dir, modelFile, weightFile) => {
     const modelPath = path.join(dir, modelFile);
     const weightPath = path.join(dir, weightFile);
@@ -143,7 +150,14 @@ const detectPestWithGemini = async (req, res) => {
         const result = await generateWithGemini({ prompt, imagePart });
         const text = extractGenAIText(result);
         const jsonMatch = text.match(/\{[\s\S]*\}/);
-        res.json({ success: true, ...JSON.parse(jsonMatch[0]) });
+        
+        if (!jsonMatch || !jsonMatch[0]) {
+            console.error("❌ Pest Error: No JSON found in response. Response:", text);
+            return res.status(500).json({ success: false, message: "Invalid AI response format." });
+        }
+        
+        const parsedData = JSON.parse(jsonMatch[0]);
+        res.json({ success: true, ...parsedData });
     } catch (e) {
         console.error("❌ Pest Error:", e.message || e);
         if (e.status === 429 || (e.message && e.message.includes("429"))) {
@@ -169,8 +183,16 @@ const predictPrice = async (req, res) => {
         const result = await generateWithGemini({ prompt });
         const text = extractGenAIText(result);
         const jsonMatch = text.match(/\{[\s\S]*\}/);
-        res.json({ success: true, ...JSON.parse(jsonMatch[0]) });
+        
+        if (!jsonMatch || !jsonMatch[0]) {
+            console.error("❌ Price Error: No JSON found in response. Response:", text);
+            return res.status(500).json({ success: false, message: "Invalid AI response format." });
+        }
+        
+        const parsedData = JSON.parse(jsonMatch[0]);
+        res.json({ success: true, ...parsedData });
     } catch (e) {
+        console.error("❌ Price Error:", e.message || e);
         if (e.status === 429 || (e.message && e.message.includes("429"))) {
             return res.status(503).json({
                 success: false,
@@ -181,7 +203,7 @@ const predictPrice = async (req, res) => {
     }
 };
 
-// ✅ ఈ ఎక్స్‌పోర్ట్స్ చాలా ముఖ్యం!
+
 module.exports = {
     getRecommendation,
     analyzeSoil,
