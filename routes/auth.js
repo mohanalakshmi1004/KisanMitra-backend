@@ -19,8 +19,9 @@ router.post("/signup", async (req, res) => {
 
     res.json({ success: true, message: "Signup successful! ఇప్పుడు లాగిన్ అవ్వండి." });
   } catch (err) {
-    res.status(500).json({ success: false, message: "సర్వర్ ఎర్రర్! మళ్ళీ ప్రయత్నించండి." });
-  }
+  console.error("SIGNUP ERROR:", err);
+  res.status(500).json({ success: false, message: err.message });
+}
 });
 
 // 🔐 LOGIN
