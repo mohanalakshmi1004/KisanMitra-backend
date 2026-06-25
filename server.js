@@ -8,7 +8,8 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 // Existing Routes
 const authRoutes = require('./routes/auth'); 
 const predictRoutes = require('./routes/predict');
-const communityRoutes = require('./routes/community'); 
+const communityRoutes = require('./routes/community');
+const mlController = require('./controllers/mlController');
 
 const app = express();
 
@@ -39,89 +40,12 @@ const upload = multer({
 /** 
  * SOIL NPK ANALYSIS 
  */
-app.post('/api/predict/soil', async (req, res) => {
-    try {
-        const { n, p, k, language = 'en' } = req.body;
-        console.log(`[Soil AI] Analyzing N:${n} P:${p} K:${k} (Lang: ${language})`);
-
-        const prompt = `Act as an expert Indian agronomist. Based on these soil NPK levels: 
-        Nitrogen=${n}, Phosphorus=${p}, Potassium=${k}. 
-        Identify the soil health and provide a specific crop treatment plan. 
-        Respond in ${language} language. 
-        Format strictly as: Soil Condition | Detailed Advice.`;
-
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const text = response.text();
-
-        // Safety check for split
-        const parts = text.includes('|') ? text.split('|') : ["Soil Analysis", text];
-        const [soilType, treatment] = parts.map(s => s.trim());
-
-        res.json({
-            success: true,
-            soilType: soilType,
-            treatment: treatment,
-            confidence: "95"
-        });
-    } catch (error) {
-        console.error("❌ SOIL AI ERROR:", error.message);
-        res.status(500).json({ success: false, error: "AI Analysis failed. Check server logs." });
-    }
-});
+app.post('/api/predict/soil', mlController.analyzeSoil);
 
 /** 
  * PEST DETECTION (GEMINI VISION) 
  */
-app.post('/api/predict/pest-gemini', upload.single('image'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ success: false, error: "No image uploaded" });
-        }
-
-        console.log(`[Pest AI] Image received: ${req.file.originalname}`);
-        const language = req.body.language || 'en';
-        
-        const imagePart = {
-            inlineData: {
-                data: req.file.buffer.toString("base64"),
-                mimeType: req.file.mimetype
-            }
-        };
-
-        const prompt = `Analyze this plant image for pests or diseases. Respond in ${language}. 
-        Format strictly as: Disease Name | Organic and Chemical Treatment Advice. 
-        If the plant is healthy, say 'Healthy | No treatment needed'.`;
-
-        try {
-            const result = await model.generateContent([prompt, imagePart]);
-            const response = await result.response;
-            const text = response.text();
-
-            const parts = text.includes('|') ? text.split('|') : ["Pest Identified", text];
-            const [disease, treatment] = parts.map(s => s.trim());
-
-            res.json({
-                success: true,
-                disease: disease,
-                treatment: treatment,
-                confidence: "92"
-            });
-        } catch (geminiError) {
-            console.error("❌ GEMINI VISION ERROR:", geminiError.message);
-            // Fallback: Generic pest response
-            res.json({
-                success: true,
-                disease: "Potential Plant Issue Detected",
-                treatment: "Please consult with a local agricultural expert or visit your nearest crop advisory center for accurate diagnosis.",
-                confidence: "50"
-            });
-        }
-    } catch (error) {
-        console.error("❌ PEST AI ERROR:", error.message);
-        res.status(500).json({ success: false, error: "Vision AI failed. Check Gemini API key." });
-    }
-});
+app.post('/api/predict/pest-gemini', upload.single('image'), mlController.detectPestWithGemini);
 
 // --- 5. SENSOR DATA (Matches Soil.js fetch) ---
 app.get('/api/sensors', (req, res) => {
@@ -140,9 +64,22 @@ app.use('/api/auth', authRoutes);
 app.use('/api/predict', predictRoutes);
 app.use('/api/community', communityRoutes); 
 
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log(`✅ MongoDB Connected: Nanna_Farmer_DB`))
-    .catch((err) => console.log(`❌ MongoDB Connection Error: ${err}`));
+const mongoUri = process.env.MONGO_URI || process.env.MONGO_URI_LOCAL || 'mongodb://127.0.0.1:27017/nanna_farmer';
+
+const connectMongo = async (uri) => {
+    try {
+        await mongoose.connect(uri, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        });
+        console.log(`✅ MongoDB Connected: ${uri}`);
+    } catch (err) {
+        console.warn(`⚠️ MongoDB Connection Error: ${err.message}`);
+        console.warn('⚠️ Continuing without MongoDB. Database-backed routes may fail until MongoDB is reachable.');
+    }
+};
+
+connectMongo(mongoUri);
 
 app.get('/', (req, res) => {
     res.send(`<h1>🚀 Nanna Farmer API is Live!</h1>`);
