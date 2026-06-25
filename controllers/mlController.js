@@ -122,7 +122,8 @@ const getRecommendation = async (req, res) => {
 // 🟢 2. SOIL DIAGNOSTIC
 const analyzeSoil = async (req, res) => {
     try {
-        const { n, p, k, language } = req.body;
+        const body = req.body || {};
+        const { n, p, k, language } = body;
         const modelDir = path.join(__dirname, '../soil_ml_models');
         const model = await tf.loadLayersModel(tf.io.fromMemory(getModelFromMemory(modelDir, 'soil_model.json', 'soil_weights.bin')));
         const input = tf.tensor2d([[Number(n), Number(p), Number(k)]]);
@@ -134,7 +135,8 @@ const analyzeSoil = async (req, res) => {
         };
         res.json({ success: true, soilType, treatment: soilTreatments[soilType] || "Use organic compost.", confidence: "95.00" });
     } catch (e) {
-        const { n, p, k, language } = req.body;
+        const body = req.body || {};
+        const { n, p, k, language } = body;
         const fallback = getSoilAnalysisFallback(n, p, k, language);
         res.json({ success: true, ...fallback });
     }
@@ -142,7 +144,8 @@ const analyzeSoil = async (req, res) => {
 
 // 🟢 3. PEST DETECTION
 const detectPestWithGemini = async (req, res) => {
-    const { language } = req.body;
+    const body = req.body || {};
+    const { language } = body;
     const fallback = {
         success: true,
         ...getPestDetectionFallback(language, req.file?.originalname || req.files?.[0]?.originalname || ''),
@@ -193,9 +196,11 @@ const detectPestWithGemini = async (req, res) => {
 
 // 🟢 4. PRICE PREDICTION
 const predictPrice = async (req, res) => {
+    const body = req.body || {};
+    const { cropName, crop, language } = body;
+    const finalCrop = cropName || crop;
+
     try {
-        const { cropName, crop, language } = req.body;
-        const finalCrop = cropName || crop;
         if (!finalCrop) return res.status(400).json({ success: false, message: "Crop name missing" });
 
         const langName = language === 'te' ? 'Telugu' : 'English';
@@ -214,7 +219,7 @@ const predictPrice = async (req, res) => {
         res.json({ success: true, ...parsedData });
     } catch (e) {
         console.error("❌ Price Error:", e.message || e);
-        const fallback = getPricePredictionFallback(cropName || crop);
+        const fallback = getPricePredictionFallback(finalCrop);
         res.json({ success: true, ...fallback });
     }
 };

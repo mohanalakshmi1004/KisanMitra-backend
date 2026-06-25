@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { predictPrice } = require('../controllers/mlController');
 const { getSoilAnalysisFallback, getPricePredictionFallback, getPestDetectionFallback } = require('../utils/predictionFallback');
 
 test('soil fallback returns a useful result for low nutrient values', () => {
@@ -32,4 +33,26 @@ test('pest fallback recognizes healthy tomato images', () => {
 test('pest fallback handles human photos as invalid input', () => {
   const result = getPestDetectionFallback('en', 'selfie.jpg');
   assert.match(result.disease, /Please upload/i);
+});
+
+test('price controller returns a fallback payload when AI generation fails', async () => {
+  const req = { body: { cropName: 'tomato' } };
+  const res = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return payload;
+    }
+  };
+
+  await predictPrice(req, res);
+
+  assert.equal(res.statusCode, null);
+  assert.equal(res.payload.success, true);
+  assert.ok(res.payload.currentPrice > 0 || res.payload.currentPrice !== undefined);
+  assert.ok(res.payload.advice);
 });
